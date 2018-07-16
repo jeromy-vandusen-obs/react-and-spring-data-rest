@@ -1,8 +1,7 @@
 package com.obsglobal.boot.react.domain.repository;
 
-import org.springframework.data.repository.CrudRepository;
-
 import com.obsglobal.boot.react.domain.model.Employee;
+import org.springframework.data.repository.PagingAndSortingRepository;
 
-public interface EmployeeRepository extends CrudRepository<Employee, Long> {
+public interface EmployeeRepository extends PagingAndSortingRepository<Employee, Long> {
 }
