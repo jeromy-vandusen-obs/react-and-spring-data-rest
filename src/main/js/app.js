@@ -7,6 +7,8 @@ const client = require('./client');
 
 const follow = require('./follow');
 
+const stompClient = require('./websocket-listener');
+
 const root = '/api';
 
 class App extends React.Component {
@@ -15,6 +17,7 @@ class App extends React.Component {
         this.state = {
             employees: [],
             attributes: [],
+            page: 1,
             pageSize: 2,
             links: {}
         };
@@ -23,6 +26,8 @@ class App extends React.Component {
         this.onUpdate = this.onUpdate.bind(this);
         this.onDelete = this.onDelete.bind(this);
         this.onNavigate = this.onNavigate.bind(this);
+        this.refreshCurrentPage = this.refreshCurrentPage.bind(this);
+        this.refreshAndGoToLastPage = this.refreshAndGoToLastPage.bind(this);
     }
 
     loadFromServer(pageSize) {
@@ -42,6 +47,7 @@ class App extends React.Component {
             });
         })
         .then(employeeCollection => {
+            this.page = employeeCollection.entity.page;
             return employeeCollection.entity._embedded.employees.map(employee => {
                 return client({
                     method: 'GET',
@@ -54,6 +60,7 @@ class App extends React.Component {
         })
         .then(employees => {
             this.setState({
+                page: this.page,
                 employees: employees,
                 attributes: Object.keys(this.schema.properties),
                 pageSize: pageSize,
@@ -63,10 +70,7 @@ class App extends React.Component {
     }
 
     onCreate(newEmployee) {
-        var self = this;
-        follow(client, root, [
-            'employees'
-        ])
+        follow(client, root, [ 'employees' ])
         .then(response => {
             return client({
                 method: 'POST',
@@ -75,19 +79,6 @@ class App extends React.Component {
                 headers: { 'Content-Type': 'application/json' }
             });
         })
-        .then(response => {
-            return follow(client, root, [
-                { rel: 'employees', params: { size: self.state.pageSize } }
-            ]);
-        })
-        .then(response => {
-            if (typeof response.entity._links.last != "undefined") {
-                this.onNavigate(response.entity._links.last.href);
-            }
-            else {
-                this.onNavigate(response.entity._links.self.href);
-            }
-        });
     }
 
     onUpdate(employee, updatedEmployee) {
@@ -100,11 +91,9 @@ class App extends React.Component {
                 'If-Match': employee.headers.Etag
             }
         })
-        .then(response => {
-            this.loadFromServer(this.state.pageSize);
-        }, response => {
+        .then(response => {}, response => {
             if (response.status.code === 412) {
-                alert('DENIED: Unable to update ' + employee.entity._links.self.href + ". Your copy is stale.");
+                alert('DENIED: Unable to update ' + employee.entity._links.self.href + '. Your copy is stale.');
             }
         });
     }
@@ -112,10 +101,7 @@ class App extends React.Component {
     onDelete(employee) {
         client({
             method: 'DELETE',
-            path: employee._links.self.href
-        })
-        .then(response => {
-            this.loadFromServer(this.state.pageSize);
+            path: employee.entity._links.self.href
         });
     }
 
@@ -126,6 +112,8 @@ class App extends React.Component {
         })
         .then(employeeCollection => {
             this.links = employeeCollection.entity._links;
+            this.page = employeeCollection.entity.page;
+
             return employeeCollection.entity._embedded.employees.map(employee => {
                 return client({
                     method: 'GET',
@@ -138,6 +126,7 @@ class App extends React.Component {
         })
         .then(employees => {
             this.setState({
+                page: this.page,
                 employees: employees,
                 attributes: Object.keys(this.schema.properties),
                 pageSize: this.state.pageSize,
@@ -152,15 +141,64 @@ class App extends React.Component {
         }
     }
 
+    refreshCurrentPage(message) {
+        follow(client, root, [
+            { rel: 'employees',params: { size: this.state.pageSize, page: this.state.page.number } }
+        ])
+        .then(employeeCollection => {
+            this.links = employeeCollection.entity._links;
+            this.page = employeeCollection.entity.page;
+
+            return employeeCollection.entity._embedded.employees.map(employee => {
+                return client({
+                    method: 'GET',
+                    path: employee._links.self.href
+                });
+            });
+        })
+        .then(employeePromises => {
+            return when.all(employeePromises);
+        })
+        .then(employees => {
+            this.setState({
+                page: this.page,
+                employees: employees,
+                attributes: Object.keys(this.schema.properties),
+                pageSize: this.state.pageSize,
+                links: this.links
+            });
+        });
+    }
+
+    refreshAndGoToLastPage(message) {
+        follow(client, root, [
+            { rel: 'employees',params: { size: this.state.pageSize } }
+        ])
+        .then(response => {
+            if (response.entity._links.last !== undefined) {
+                this.onNavigate(response.entity._links.last.href);
+            }
+            else {
+                this.onNavigate(response.entity._links.self.href);
+            }
+        });
+    }
+
     componentDidMount() {
         this.loadFromServer(this.state.pageSize);
+        stompClient.register([
+            {route: '/topic/newEmployee', callback: this.refreshAndGoToLastPage},
+            {route: '/topic/updateEmployee', callback: this.refreshCurrentPage},
+            {route: '/topic/deleteEmployee', callback: this.refreshCurrentPage}
+        ]);
     }
 
     render() {
         return (
             <div>
                 <CreateDialog attributes={this.state.attributes} onCreate={this.onCreate}/>
-                <EmployeeList employees={this.state.employees}
+                <EmployeeList page={this.state.page}
+                              employees={this.state.employees}
                               links={this.state.links}
                               pageSize={this.state.pageSize}
                               attributes={this.state.attributes}
@@ -238,7 +276,10 @@ class UpdateDialog extends React.Component {
     render() {
         var inputs = this.props.attributes.map(attribute =>
             <p key={this.props.employee.entity[attribute]}>
-                <input type="text" placeholder={attribute} defaultValue={this.props.employee.entity[attribute]} ref={attribute} className="field"/>
+                <input type="text" placeholder={attribute}
+                                   defaultValue={this.props.employee.entity[attribute]}
+                                   ref={attribute}
+                                   className="field"/>
             </p>
         );
 
@@ -304,6 +345,8 @@ class EmployeeList extends React.Component {
     }
 
     render() {
+        var pageInfo = this.props.page.hasOwnProperty("number") ? <h3>Employees - Page {this.props.page.number + 1} of {this.props.page.totalPages}</h3> : null;
+
         var employees = this.props.employees.map(employee =>
             <Employee key={employee.entity._links.self.href}
                       employee={employee}
@@ -336,6 +379,7 @@ class EmployeeList extends React.Component {
 
         return (
             <div>
+                {pageInfo}
                 <input ref="pageSize" defaultValue={this.props.pageSize} onInput={this.handleInput}/>
                 <table>
                     <tbody>
