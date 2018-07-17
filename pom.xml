@@ -5,7 +5,7 @@
     
     <groupId>com.obsglobal.springboot</groupId>
     <artifactId>react-and-spring-data-rest</artifactId>
-    <version>1.2.0</version>
+    <version>1.3.0</version>
     <packaging>jar</packaging>
     
     <name>react-and-spring-data-rest</name>
